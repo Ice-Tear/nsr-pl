@@ -197,7 +197,7 @@ class VolumeSDF(BaseImplicitGeometry):
                         grad = 0.5 * (points_d_sdf[..., 0::2] - points_d_sdf[..., 1::2]) / eps  
 
                         if with_laplace:
-                            laplace = (points_d_sdf[..., 0::2] + points_d_sdf[..., 1::2] - 2 * sdf[..., None]) / (eps ** 2)
+                            laplace = (points_d_sdf[..., 0::2] + points_d_sdf[..., 1::2] - 2 * sdf[..., None]).sum(-1) / (eps ** 2)
 
         rv = [sdf]
         if with_grad:
