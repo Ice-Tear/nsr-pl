@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch_efficient_distloss import flatten_eff_distloss
 
 import pytorch_lightning as pl
@@ -120,11 +121,21 @@ class NeuSSystem(BaseSystem):
         self.log('train/loss_sparsity', loss_sparsity)
         loss += loss_sparsity * self.C(self.config.system.loss.lambda_sparsity)
 
+
         if self.C(self.config.system.loss.lambda_curvature) > 0:
             assert 'sdf_laplace_samples' in out, "Need geometry.grad_type='finite_difference' to get SDF Laplace samples"
             loss_curvature = out['sdf_laplace_samples'].abs().mean()
             self.log('train/loss_curvature', loss_curvature)
-            loss += loss_curvature * self.C(self.config.system.loss.lambda_curvature)
+            # warm up the weight of curv loss
+            if self.global_step < self.config.system.loss.curvature_warmup_steps:
+                curvature_weight = (self.global_step+1) * self.C(self.config.system.loss.lambda_curvature) / self.config.system.loss.curvature_warmup_steps
+            else:
+                # decay the weight of curv loss
+                growth_ratio = self.config.model.geometry.xyz_encoding_config.per_level_scale
+                growth_steps = self.config.model.geometry.xyz_encoding_config.update_steps
+                curvature_weight = np.exp(-max(self.global_step - self.config.system.loss.curvature_warmup_steps,0) * np.log(growth_ratio) / growth_steps) * self.C(self.config.system.loss.lambda_curvature)
+            loss += loss_curvature * curvature_weight
+
 
         # distortion loss proposed in MipNeRF360
         # an efficient implementation from https://github.com/sunset1995/torch_efficient_distloss

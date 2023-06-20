@@ -152,6 +152,7 @@ class VolumeSDF(BaseImplicitGeometry):
         # the actual value used in training
         # will update at certain steps if finite_difference_eps="progressive"
         self._finite_difference_eps = None
+
         if self.grad_type == 'finite_difference':
             rank_zero_info(f"Using finite difference to compute gradients with eps={self.finite_difference_eps}")
 
@@ -196,7 +197,7 @@ class VolumeSDF(BaseImplicitGeometry):
                         grad = 0.5 * (points_d_sdf[..., 0::2] - points_d_sdf[..., 1::2]) / eps  
 
                         if with_laplace:
-                            laplace = (points_d_sdf[..., 0::2] + points_d_sdf[..., 1::2] - 2 * sdf[..., None]).sum(-1) / (eps ** 2)
+                            laplace = (points_d_sdf[..., 0::2] + points_d_sdf[..., 1::2] - 2 * sdf[..., None]) / (eps ** 2)
 
         rv = [sdf]
         if with_grad:
@@ -225,14 +226,28 @@ class VolumeSDF(BaseImplicitGeometry):
             elif self.finite_difference_eps == 'progressive':
                 hg_conf = self.config.xyz_encoding_config
                 assert hg_conf.otype == "ProgressiveBandHashGrid", "finite_difference_eps='progressive' only works with ProgressiveBandHashGrid"
-                current_level = min(
-                    hg_conf.start_level + max(global_step - hg_conf.start_step, 0) // hg_conf.update_steps,
-                    hg_conf.n_levels
-                )
-                grid_res = hg_conf.base_resolution * hg_conf.per_level_scale**(current_level - 1)
-                grid_size = 2 * self.config.radius / grid_res
-                if grid_size != self._finite_difference_eps:
-                    rank_zero_info(f"Update finite_difference_eps to {grid_size}")
-                self._finite_difference_eps = grid_size
+                
+                # compute the begin eps size
+                base_res = np.floor(hg_conf.base_resolution * hg_conf.per_level_scale**(hg_conf.start_level - 1))
+                base_size = 2 * self.config.radius / base_res
+                
+                # compute the final eps size
+                finest_res = np.floor(hg_conf.base_resolution * hg_conf.per_level_scale**(hg_conf.n_levels - 1))
+                finest_size = 2 * self.config.radius / finest_res
+                # finest_size_ratio is a hyperparameter to control the size of final eps
+                # Because I think the final eps size should be smaller than the finest size (in paper is equal)
+                final_size = finest_size / hg_conf.finest_size_ratio
+                
+                eps_decay_ratio = np.exp(-global_step * np.log(hg_conf.per_level_scale) / hg_conf.update_steps)
+                current_grid_size = base_size * eps_decay_ratio
+                # when current grid size is smaller than the final grid size , switch to analytic gradient to speed up training. (But the curvature cannot be calculated !)
+                if current_grid_size < final_size:
+                    self.grad_type = 'analytic'
+                else:
+                    if (hg_conf.start_level + max(global_step - hg_conf.start_step, 0)) % hg_conf.update_steps == 0:
+                        rank_zero_info(f"Update finite_difference_eps to {current_grid_size}")
+                    self._finite_difference_eps = current_grid_size
+
+
             else:
                 raise ValueError(f"Unknown finite_difference_eps={self.finite_difference_eps}")

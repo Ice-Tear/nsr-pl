@@ -226,7 +226,7 @@ class NeuSModel(BaseModel):
         positions = t_origins + t_dirs * midpoints
         dists = t_ends - t_starts
 
-        if self.config.geometry.grad_type == 'finite_difference':
+        if self.geometry.grad_type == 'finite_difference':
             sdf, sdf_grad, feature, sdf_laplace = self.geometry(positions, with_grad=True, with_feature=True, with_laplace=True)
         else:
             sdf, sdf_grad, feature = self.geometry(positions, with_grad=True, with_feature=True)
@@ -260,7 +260,7 @@ class NeuSModel(BaseModel):
                 'intervals': dists.view(-1),
                 'ray_indices': ray_indices.view(-1)                
             })
-            if self.config.geometry.grad_type == 'finite_difference':
+            if self.geometry.grad_type == 'finite_difference':
                 out.update({
                     'sdf_laplace_samples': sdf_laplace
                 })
