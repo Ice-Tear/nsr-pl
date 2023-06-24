@@ -122,7 +122,7 @@ class NeuSSystem(BaseSystem):
         loss += loss_sparsity * self.C(self.config.system.loss.lambda_sparsity)
 
 
-        if self.C(self.config.system.loss.lambda_curvature) > 0:
+        if self.C(self.config.system.loss.lambda_curvature) > 0 and 'sdf_laplace_samples' in out:
             assert 'sdf_laplace_samples' in out, "Need geometry.grad_type='finite_difference' to get SDF Laplace samples"
             loss_curvature = out['sdf_laplace_samples'].abs().mean()
             self.log('train/loss_curvature', loss_curvature)
