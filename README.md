@@ -61,7 +61,7 @@ python launch.py --config configs/neus-dtu.yaml --gpu 0 --train
 # train NeuS on DTU with mask
 python launch.py --config configs/neus-dtu-wmask.yaml --gpu 0 --train
 # train NeuS on DTU with mask using tricks from Neuralangelo (experimental)
-python launch.py --config configs/neuralangelo-dtu-wmask.yaml --gpu 0 --train
+python launch.py --config configs/neuralangelo-dtu24-wmask.yaml --gpu 0 --train
 ```
 Notes:
 - PSNR in the testing stage is meaningless, as we simply compare to pure white images in testing.

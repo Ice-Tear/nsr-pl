@@ -13,7 +13,7 @@ from models.ray_utils import get_rays
 import systems
 from systems.base import BaseSystem
 from systems.criterions import PSNR, binary_cross_entropy
-
+from utils.misc import get_rank
 
 @systems.register('neus-system')
 class NeuSSystem(BaseSystem):
@@ -22,6 +22,13 @@ class NeuSSystem(BaseSystem):
     1. self.print: correctly handle progress bar
     2. rank_zero_info: use the logging module
     """
+    def __init__(self, config):
+        super().__init__(config)
+        # init finite difference eps
+        self.model.geometry.init_finite_difference(self.config.trainer.max_steps)
+        # init weight of curv loss 
+        self.init_curvloss()
+
     def prepare(self):
         self.criterions = {
             'psnr': PSNR()
@@ -122,19 +129,11 @@ class NeuSSystem(BaseSystem):
         loss += loss_sparsity * self.C(self.config.system.loss.lambda_sparsity)
 
 
-        if self.C(self.config.system.loss.lambda_curvature) > 0 and 'sdf_laplace_samples' in out:
+        if self.config.system.loss.lambda_curvature > 0 and self.config.model.geometry.grad_type == 'finite_difference':
             assert 'sdf_laplace_samples' in out, "Need geometry.grad_type='finite_difference' to get SDF Laplace samples"
             loss_curvature = out['sdf_laplace_samples'].abs().mean()
             self.log('train/loss_curvature', loss_curvature)
-            # warm up the weight of curv loss
-            if self.global_step < self.config.system.loss.curvature_warmup_steps:
-                curvature_weight = (self.global_step+1) * self.C(self.config.system.loss.lambda_curvature) / self.config.system.loss.curvature_warmup_steps
-            else:
-                # decay the weight of curv loss
-                growth_ratio = self.config.model.geometry.xyz_encoding_config.per_level_scale
-                growth_steps = self.config.model.geometry.xyz_encoding_config.update_steps
-                curvature_weight = np.exp(-max(self.global_step - self.config.system.loss.curvature_warmup_steps,0) * np.log(growth_ratio) / growth_steps) * self.C(self.config.system.loss.lambda_curvature)
-            loss += loss_curvature * curvature_weight
+            loss += loss_curvature * self.curvature_weight[self.global_step]
 
 
         # distortion loss proposed in MipNeRF360
@@ -274,3 +273,17 @@ class NeuSSystem(BaseSystem):
             f"it{self.global_step}-{self.config.model.geometry.isosurface.method}{self.config.model.geometry.isosurface.resolution}.obj",
             **mesh
         )        
+
+    def init_curvloss(self):
+        # decay the weight of curv loss
+        growth_ratio = self.config.model.geometry.xyz_encoding_config.per_level_scale
+        growth_steps = self.config.model.geometry.xyz_encoding_config.update_steps
+        self.curvature_weight = []
+        for i in range(self.config.trainer.max_steps + 300):
+            # warm up the weight of curv loss
+            if i < self.config.system.loss.curvature_warmup_steps:
+                self.curvature_weight.append((i+1) * self.config.system.loss.lambda_curvature / self.config.system.loss.curvature_warmup_steps)
+            else:
+                # decay the weight of curv loss
+                self.curvature_weight.append(1. / (np.power(growth_ratio, ((i - self.config.system.loss.curvature_warmup_steps) / growth_steps))) * self.config.system.loss.lambda_curvature)
+        self.curvature_weight = torch.as_tensor(self.curvature_weight).to(get_rank())

@@ -10,7 +10,7 @@ from models.utils import chunk_batch
 from systems.utils import update_module_step
 from nerfacc import ContractionType, OccupancyGrid, ray_marching, render_weight_from_density, render_weight_from_alpha, accumulate_along_rays
 from nerfacc.intersection import ray_aabb_intersect
-
+from models.geometry import contract_to_unisphere
 
 class VarianceNetwork(nn.Module):
     def __init__(self, config):
@@ -232,7 +232,9 @@ class NeuSModel(BaseModel):
             sdf, sdf_grad, feature = self.geometry(positions, with_grad=True, with_feature=True)
         normal = F.normalize(sdf_grad, p=2, dim=-1)
         alpha = self.get_alpha(sdf, normal, t_dirs, dists)[...,None]
-        rgb = self.texture(feature, t_dirs, normal)
+
+        # NeuS2 network
+        rgb = self.texture(feature, t_dirs, normal, contract_to_unisphere(positions, self.config.radius, ContractionType.AABB))
 
         weights = render_weight_from_alpha(alpha, ray_indices=ray_indices, n_rays=n_rays)
         opacity = accumulate_along_rays(weights, ray_indices, values=None, n_rays=n_rays)

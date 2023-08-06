@@ -14,11 +14,16 @@ class VolumeRadiance(nn.Module):
         self.config = config
         self.n_dir_dims = self.config.get('n_dir_dims', 3)
         self.n_output_dims = 3
+        
+        # NeuS2 network
+        self.include_xyz = self.config.include_xyz
+
         encoding = get_encoding(self.n_dir_dims, self.config.dir_encoding_config)
-        self.n_input_dims = self.config.input_feature_dim + encoding.n_output_dims
+        self.n_input_dims = self.config.input_feature_dim + encoding.n_output_dims + int(self.include_xyz) * 3
         network = get_mlp(self.n_input_dims, self.n_output_dims, self.config.mlp_network_config)    
         self.encoding = encoding
         self.network = network
+
     
     def forward(self, features, dirs, *args):
         dirs = (dirs + 1.) / 2. # (-1, 1) => (0, 1)

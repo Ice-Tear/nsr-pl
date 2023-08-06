@@ -167,8 +167,14 @@ class VolumeSDF(BaseImplicitGeometry):
                 points_ = points # points in the original scale
                 points = contract_to_unisphere(points, self.radius, self.contraction_type) # points normalized to (0, 1)
                 
-                out = self.network(self.encoding(points.view(-1, 3))).view(*points.shape[:-1], self.n_output_dims).float()
-                sdf, feature = out[...,0], out
+                if self.grad_type == 'finite_difference':
+                    with torch.no_grad():
+                        out = self.network(self.encoding(points.view(-1, 3))).view(*points.shape[:-1], self.n_output_dims).float()
+                        sdf, feature = out[...,0], out
+                else:
+                    out = self.network(self.encoding(points.view(-1, 3))).view(*points.shape[:-1], self.n_output_dims).float()
+                    sdf, feature = out[...,0], out
+
                 if 'sdf_activation' in self.config:
                     sdf = get_activation(self.config.sdf_activation)(sdf + float(self.config.sdf_bias))
                 if 'feature_activation' in self.config:
@@ -180,25 +186,9 @@ class VolumeSDF(BaseImplicitGeometry):
                             create_graph=True, retain_graph=True, only_inputs=True
                         )[0]
                     elif self.grad_type == 'finite_difference':
-                        eps = self._finite_difference_eps
-                        offsets = torch.as_tensor(
-                            [
-                                [eps, 0.0, 0.0],
-                                [-eps, 0.0, 0.0],
-                                [0.0, eps, 0.0],
-                                [0.0, -eps, 0.0],
-                                [0.0, 0.0, eps],
-                                [0.0, 0.0, -eps],
-                            ]
-                        ).to(points_)
-                        points_d_ = (points_[...,None,:] + offsets).clamp(-self.radius, self.radius)
-                        points_d = scale_anything(points_d_, (-self.radius, self.radius), (0, 1))
-                        points_d_sdf = self.network(self.encoding(points_d.view(-1, 3)))[...,0].view(*points.shape[:-1], 6).float()
-                        grad = 0.5 * (points_d_sdf[..., 0::2] - points_d_sdf[..., 1::2]) / eps  
 
-                        if with_laplace:
-                            laplace = (points_d_sdf[..., 0::2] + points_d_sdf[..., 1::2] - 2 * sdf[..., None]).sum(-1) / (eps ** 2)
-
+                        sdf, feature, grad, laplace = self.get_numerical_grad_and_laplace_from_4points_with_tet(points_, sdf, with_laplace)
+                      
         rv = [sdf]
         if with_grad:
             rv.append(grad)
@@ -209,6 +199,34 @@ class VolumeSDF(BaseImplicitGeometry):
             rv.append(laplace)
         rv = [v if self.training else v.detach() for v in rv]
         return rv[0] if len(rv) == 1 else rv
+
+    def get_numerical_grad_and_laplace_from_4points_with_tet(self, points, sdf, with_laplace):
+        # todo: Can it be accelerated with cuda?
+        eps = self._finite_difference_eps
+        # 四面体有限差分 reference by https://feiqi3.cn/blog/74
+        offsets = torch.as_tensor(
+            [
+                [1.0, -1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [-1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+            ]
+        ).to(points)
+        points_d_ = (points[...,None,:] + offsets * eps).clamp(-self.radius, self.radius)
+        points_d = scale_anything(points_d_, (-self.radius, self.radius), (0, 1))
+        neibers_out = self.network(self.encoding(points_d.view(-1, 3))).view(*points.shape[:-1], 4, self.n_output_dims)
+        
+        points_d_sdf = neibers_out[...,0].float()
+        feature = neibers_out.sum(-2) * 0.25
+        central_sdf = feature[...,0]
+
+        grad = .25 / eps * (offsets * points_d_sdf[...,None]).sum(-2)
+        if with_laplace:
+            laplace = 1.5 * (points_d_sdf.sum(-1) - 4 * sdf) / (eps ** 2)
+        else:
+            laplace = None
+        return central_sdf, feature, grad, laplace
+
 
     def forward_level(self, points):
         points = contract_to_unisphere(points, self.radius, self.contraction_type) # points normalized to (0, 1)
@@ -227,27 +245,26 @@ class VolumeSDF(BaseImplicitGeometry):
                 hg_conf = self.config.xyz_encoding_config
                 assert hg_conf.otype == "ProgressiveBandHashGrid", "finite_difference_eps='progressive' only works with ProgressiveBandHashGrid"
                 
-                # compute the begin eps size
-                base_res = np.floor(hg_conf.base_resolution * hg_conf.per_level_scale**(hg_conf.start_level - 1))
-                base_size = 2 * self.config.radius / base_res
-                
-                # compute the final eps size
-                finest_res = np.floor(hg_conf.base_resolution * hg_conf.per_level_scale**(hg_conf.n_levels - 1))
-                finest_size = 2 * self.config.radius / finest_res
-                # finest_size_ratio is a hyperparameter to control the size of final eps
-                # Because I think the final eps size should be smaller than the finest size (in paper is equal)
-                final_size = finest_size / hg_conf.finest_size_ratio
-                
-                eps_decay_ratio = np.exp(-global_step * np.log(hg_conf.per_level_scale) / hg_conf.update_steps)
-                current_grid_size = base_size * eps_decay_ratio
-                # when current grid size is smaller than the final grid size , switch to analytic gradient to speed up training. (But the curvature cannot be calculated !)
-                if current_grid_size < final_size:
-                    self.grad_type = 'analytic'
-                else:
-                    if (hg_conf.start_level + max(global_step - hg_conf.start_step, 0)) % hg_conf.update_steps == 0:
-                        rank_zero_info(f"Update finite_difference_eps to {current_grid_size}")
-                    self._finite_difference_eps = current_grid_size
-
+                self._finite_difference_eps = self.current_size[global_step]
 
             else:
                 raise ValueError(f"Unknown finite_difference_eps={self.finite_difference_eps}")
+
+    def init_finite_difference(self, max_steps):
+        start_step = self.config.xyz_encoding_config.start_step
+        # compute the begin eps size
+        self.base_res = np.floor(self.config.xyz_encoding_config.base_resolution * self.config.xyz_encoding_config.per_level_scale ** (self.config.xyz_encoding_config.start_level - 1))
+        self.base_size = 2 * self.config.radius / self.base_res
+        # compute the final eps size
+        self.finest_res = np.floor(self.config.xyz_encoding_config.base_resolution * self.config.xyz_encoding_config.per_level_scale ** (self.config.xyz_encoding_config.n_levels - 1))
+        self.finest_size = 2 * self.config.radius / self.finest_res
+        self.final_size = self.finest_size / self.config.xyz_encoding_config.finest_size_ratio
+        self.current_size = []
+        for i in range(max_steps+300):
+            if i < start_step:
+                self.current_size.append(self.base_size)
+            else:
+                self.current_size.append(max(2 * self.config.radius / (self.base_res * np.power(self.config.xyz_encoding_config.per_level_scale, ((i - start_step) / self.config.xyz_encoding_config.update_steps))), self.final_size))
+        self.current_size = torch.as_tensor(self.current_size).to(get_rank())
+        
+        
