@@ -270,7 +270,7 @@ class NeuSSystem(BaseSystem):
     def export(self):
         mesh = self.model.export(self.config.export)
         self.save_mesh(
-            f"it{self.global_step}-{self.config.model.geometry.isosurface.method}{self.config.model.geometry.isosurface.resolution}.obj",
+            f"it{self.global_step}-{self.config.model.geometry.isosurface.method}{self.config.model.geometry.isosurface.resolution}.ply",
             **mesh
         )        
 

@@ -318,6 +318,10 @@ class NeuSModel(BaseModel):
         if export_config.export_vertex_color:
             _, sdf_grad, feature = chunk_batch(self.geometry, export_config.chunk_size, False, mesh['v_pos'].to(self.rank), with_grad=True, with_feature=True)
             normal = F.normalize(sdf_grad, p=2, dim=-1)
-            rgb = self.texture(feature, -normal, normal) # set the viewing directions to the normal to get "albedo"
+            # NeuS2 network
+            if self.texture.include_xyz :
+                rgb = self.texture(feature, -normal, normal, mesh['v_pos'].to(self.rank))
+            else:
+                rgb = self.texture(feature, -normal, normal) # set the viewing directions to the normal to get "albedo"
             mesh['v_rgb'] = rgb.cpu()
         return mesh
